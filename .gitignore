@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Datos derivados: reproducibles con `uv run python -m apu_streaming.dataset`.
+# Ignorar contenido, no el directorio, para que los .gitkeep se versionen.
+data/cache/*
+!data/cache/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+data/serving.db
+tmp/*
+!tmp/.gitkeep
+
+.env
+.marimo.lock
