@@ -44,9 +44,7 @@ def test_event_id_is_stable_across_runs_and_survives_a_duplicate():
 
 
 def test_event_id_ignores_replay_shifted_event_time():
-    shifted = reading_events(
-        sample_row(), schema_version=1, event_time="2026-09-16T07:05:00Z"
-    )
+    shifted = reading_events(sample_row(), schema_version=1, event_time="2026-09-16T07:05:00Z")
     unshifted = reading_events(sample_row(), schema_version=1)
     assert shifted[0].event_id == unshifted[0].event_id
 
