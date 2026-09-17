@@ -103,15 +103,10 @@ uv run python scripts/check_health.py       # 8. separación de flota (post comp
 - `is_last = 1` nunca llega a materializarse con el trigger configurado
   (`AfterWatermark` + refiring tardío): el verificador de salida lee la fila
   almacenada, que por RN-06 ya es el pane más reciente de cada `aggregate_id`.
-- `tests/test_windows_teststream.py` corre con `streaming_triggers=False` y no
-  asserta `pane_index`/`pane_timing`; la secuencia E1–E9 del plan con
-  `streaming = True` y pane LATE de corrección queda pendiente.
 - El smoke de adversos en compose del plan (tópicos efímeros, 5 aserciones:
   cuarentena ≥ 1, too_late ≥ 1, `duplicates_dropped > 0`, etc.) aún no está
   implementado; `scripts/smoke.py` es el smoke offline DirectRunner y reporta
   `quarantined: 0` porque no inyecta payloads rotos.
-- `tests/test_dedup_state.py` no cubre la expiración del estado por timer de
-  watermark (re-admisión del mismo `event_id` tras `window.end + lateness`).
 - El recorrido completo sobre Docker (`docker compose up --build` + pipeline
   en Flink + verificador) no se ejecutó en esta sesión; la separación de
   flota sí quedó probada sobre DirectRunner con el dataset completo

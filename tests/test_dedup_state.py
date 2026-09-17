@@ -71,6 +71,39 @@ def test_same_event_id_in_distinct_windows_is_not_deduped_globally():
         )
 
 
+def test_dedup_state_expires_when_watermark_passes_horizon():
+    """Tras `window.end + allowed_lateness`, el timer de watermark limpia el
+    estado: el mismo `event_id` vuelve a pasar (la ventana quedó recolectada)."""
+    from apache_beam.options.pipeline_options import PipelineOptions, StandardOptions
+    from apache_beam.testing.test_stream import TestStream, TimestampedValue
+
+    e_first = _ev("exp-id", "apu-01", "1970-01-01T00:01:00Z")
+    e_after_expiry = _ev("exp-id", "apu-01", "1970-01-01T00:01:00Z")
+
+    ts = (
+        TestStream()
+        .add_elements([TimestampedValue(e_first, 60.0)])
+        # window [0, 300); allowed_lateness 60 → horizonte 360.
+        .advance_watermark_to(400.0)  # timer expira, seen_ids.clear()
+        .add_elements([TimestampedValue(e_after_expiry, 60.0)])
+        .advance_watermark_to_infinity()
+    )
+
+    options = PipelineOptions()
+    options.view_as(StandardOptions).streaming = True
+    with TestPipeline(options=options) as p:
+        out = (
+            p
+            | ts
+            | beam.WindowInto(beam.window.FixedWindows(300), allowed_lateness=60)
+            | beam.Map(lambda e: (e["asset_id"], e))
+            | beam.ParDo(DeduplicateReadings(allowed_lateness_seconds=60))
+            | beam.Map(lambda e: e["event_id"])
+        )
+        # Sin expiración el segundo paso sería filtrado y quedaría ["exp-id"].
+        assert_that(out, equal_to(["exp-id", "exp-id"]))
+
+
 def test_dedup_is_scoped_per_asset_not_global():
     """Same event_id on different assets must NOT collide: state is per key."""
     e_a = _ev("cross-id", "apu-01", "2026-01-01T00:01:00Z")

@@ -52,10 +52,143 @@ def _raw_event(eid: str, value: float, event_ts: float, ingest_ts: float | None 
     }
 
 
+# --- E1-E9: secuencia completa de tarea2 con streaming real -----------------
+#
+# Trazas de tarea2 (wm = maxET - 120 s) mapeadas a epoch [0, 300) para W1:
+#   E1 ET 20 v4.0 · E2 ET 70 v4.4 · E3 ET 290 v5.0 · E4 ET 150 v4.2 (desord.
+#   a tiempo) · E5 ET 370 v5.6 · E7 ET 450 v5.2 · E6 ET 220 v6.0 (tardío
+#   aceptado: corrige 4.4 → 4.72) · E9 ET 1180 (cierra W1 y W2) · E8 ET 110
+#   v9.9 con lag 1210 s > 720 → rechazado por ParseAndAdmit (dropped_by_horizon).
+#
+# pane_timing sale serializado como int ("0"=EARLY, "1"=ON_TIME, "2"=LATE)
+# porque str(IntEnum) en Python 3.11+ produce el valor numérico.
+
+ASSET_E9 = "apu-04"
+W1_START_ISO = "1970-01-01T00:00:00"
+
+EARLY, ON_TIME, LATE = "0", "1", "2"
+
+
 def _to_iso(ts: float) -> str:
     from datetime import UTC, datetime
 
     return datetime.fromtimestamp(ts, tz=UTC).isoformat().replace("+00:00", "Z")
+
+
+def _e9_pair(eid: str, value: float, et: float, at: float) -> tuple[bytes, bytes]:
+    """Evento de la secuencia E1-E9 como par Kafka (key, payload)."""
+    from apu_streaming.contracts import encode_event
+
+    return (
+        ASSET_E9.encode(),
+        encode_event({**_raw_event(eid, value, et, at), "asset_id": ASSET_E9}),
+    )
+
+
+def test_e1_e9_sequence_panes_accumulate_and_correct():
+    """Secuencia E1-E9 de tarea2 end-to-end en un solo TestStream:
+    ParseAndAdmit → windowing con triggers streaming → panes EARLY/ON_TIME/LATE
+    con pane_index monótono y corrección del valor por E6."""
+    settings = Settings(window_seconds=300, allowed_lateness_seconds=720, early_firing_seconds=10)
+
+    pair = _e9_pair
+    ts = (
+        TestStream()
+        # --- E1, early pane n=1, wm 20-120=-100
+        .add_elements([TimestampedValue(pair("E1", 4.0, 20, 45), 20.0)])
+        .advance_processing_time(10.0)  # EARLY pane: n=1, mean 4.0
+        .advance_watermark_to(-100.0)
+        # --- E2, early pane n=2
+        .add_elements([TimestampedValue(pair("E2", 4.4, 70, 90), 70.0)])
+        .advance_processing_time(10.0)  # EARLY pane: n=2, mean 4.2
+        .advance_watermark_to(-50.0)
+        # --- duplicado de E2: no debe contar dos veces (dedup con estado)
+        .add_elements([TimestampedValue(pair("E2", 4.4, 70, 95), 70.0)])
+        # --- E3, early pane n=3
+        .add_elements([TimestampedValue(pair("E3", 5.0, 290, 305), 290.0)])
+        .advance_processing_time(10.0)  # EARLY pane: n=3, mean 4.4667
+        .advance_watermark_to(170.0)
+        # --- E4 desordenado pero a tiempo (wm 170 < fin 300)
+        .add_elements([TimestampedValue(pair("E4", 4.2, 150, 320), 150.0)])
+        .advance_processing_time(10.0)  # EARLY pane: n=4, mean 4.4
+        # --- E5, E7: empujan maxET a 450 → wm 330 > fin W1 → ON_TIME n=4
+        .add_elements([TimestampedValue(pair("E5", 5.6, 370, 385), 370.0)])
+        .advance_watermark_to(250.0)
+        .add_elements([TimestampedValue(pair("E7", 5.2, 450, 470), 450.0)])
+        .advance_watermark_to(330.0)  # W1 ON_TIME: n=4, mean 4.4
+        # --- E6 tardío aceptado: corrige a n=5 mean 4.72, pane LATE
+        .add_elements([TimestampedValue(pair("E6", 6.0, 220, 540), 220.0)])
+        # --- E9 empuja wm a 1060 > horizonte W1 (300+720=1020)
+        .add_elements([TimestampedValue(pair("E9", 5.1, 1180, 1200), 1180.0)])
+        .advance_watermark_to(1060.0)
+        # --- E8: ET 110, AT 1320 → lag 1210 > 720 → dropped_by_horizon
+        .add_elements([TimestampedValue(pair("E8", 9.9, 110, 1320), 110.0)])
+        .advance_watermark_to_infinity()
+    )
+
+    from apache_beam.options.pipeline_options import PipelineOptions, StandardOptions
+
+    options = PipelineOptions()
+    options.view_as(StandardOptions).streaming = True
+    with TestPipeline(options=options) as p:
+        parsed = (
+            p
+            | ts
+            | beam.ParDo(ParseAndAdmit(settings)).with_outputs(
+                ParseAndAdmit.QUARANTINE, ParseAndAdmit.TOO_LATE, main="valid"
+            )
+        )
+        aggregates = build_analytics(parsed.valid, settings, streaming_triggers=True)
+
+        # W1 pane sequence, keyed by pane_index
+        w1_panes = (
+            aggregates
+            | "W1Stats"
+            >> beam.Filter(
+                lambda r: (
+                    r["metric_type"] == "apu_signal_stats" and r["window_start"] == W1_START_ISO
+                )
+            )
+            | "W1KV"
+            >> beam.Map(
+                lambda r: (r["pane_index"], r["pane_timing"], r["readings"], r["value_mean"])
+            )
+        )
+        assert_that(
+            w1_panes,
+            equal_to(
+                [
+                    (0, EARLY, 1, 4.0),
+                    (1, EARLY, 2, 4.2),
+                    (2, EARLY, 3, 4.4667),  # mean(4.0, 4.4, 5.0)
+                    (3, EARLY, 4, 4.4),  # E4 desordenado entra al pane temprano
+                    (4, ON_TIME, 4, 4.4),  # wm cruza el fin (330 > 300)
+                    (5, LATE, 5, 4.72),  # E6 corrige: pane_index mayor
+                ]
+            ),
+        )
+
+        # E8 fue desviado ANTES de las ventanas: nunca genera pane en W1.
+        too_late_rows = parsed.too_late | "TLIds" >> beam.Map(lambda r: r["event_id"])
+        assert_that(too_late_rows, equal_to(["E8"]), label="E8RejectedByHorizon")
+
+        # W2 ([300,600)) cerró on-time con E5+E7: n=2, mean 5.4.
+        w2_panes = (
+            aggregates
+            | "W2Stats"
+            >> beam.Filter(
+                lambda r: (
+                    r["metric_type"] == "apu_signal_stats"
+                    and r["window_start"] == "1970-01-01T00:05:00"
+                )
+            )
+            | "W2KV" >> beam.Map(lambda r: (r["pane_timing"], r["readings"], r["value_mean"]))
+        )
+        assert_that(
+            w2_panes,
+            equal_to([(ON_TIME, 2, 5.4)]),
+            label="W2ClosedOnTime",
+        )
 
 
 def test_on_time_events_land_in_first_window_and_close_at_watermark():
