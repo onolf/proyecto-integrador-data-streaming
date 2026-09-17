@@ -1,0 +1,194 @@
+name: proyecto-integrador-apu-streaming
+
+x-lab-environment: &lab-environment
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  KAFKA_RAW_TOPIC: sensor.readings.raw
+  KAFKA_FEATURES_TOPIC: features.asset
+  KAFKA_QUARANTINE_TOPIC: sensor.readings.quarantine
+  KAFKA_TOO_LATE_TOPIC: sensor.readings.too_late
+  BEAM_JOB_ENDPOINT: beam-job-server:8099
+  BEAM_PARALLELISM: "${BEAM_PARALLELISM:-2}"
+  WINDOW_SECONDS: "300"
+  ALLOWED_LATENESS_SECONDS: "720"
+  EARLY_FIRING_SECONDS: "10"
+  APU_LAB_ROOT: /app
+
+x-notebook: &notebook
+  build:
+    context: .
+    dockerfile: Dockerfile
+  environment: *lab-environment
+  volumes:
+    - ./src:/app/src
+    - ./data:/app/data
+    - ./tmp:/app/tmp
+  restart: unless-stopped
+
+services:
+  kafka:
+    image: apache/kafka:4.1.1
+    ports:
+      - "29092:29092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: CONTROLLER://:9093,PLAINTEXT://:9092,PLAINTEXT_HOST://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_NUM_PARTITIONS: 6
+      KAFKA_LOG_RETENTION_HOURS: 24
+      KAFKA_LOG_MESSAGE_TIMESTAMP_BEFORE_MAX_MS: 86400000
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    mem_limit: 1200m
+
+  kafka-init:
+    image: apache/kafka:4.1.1
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-ec"]
+    command:
+      - |
+        for topic in sensor.readings.raw features.asset; do
+          /opt/kafka/bin/kafka-topics.sh \
+            --bootstrap-server kafka:9092 \
+            --create --if-not-exists \
+            --topic "$$topic" --partitions 6 --replication-factor 1
+        done
+        for topic in sensor.readings.quarantine sensor.readings.too_late; do
+          /opt/kafka/bin/kafka-topics.sh \
+            --bootstrap-server kafka:9092 \
+            --create --if-not-exists \
+            --topic "$$topic" --partitions 3 --replication-factor 1
+        done
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --describe
+
+  dataset-init:
+    <<: *notebook
+    command: ["/app/.venv/bin/python", "-m", "apu_streaming.dataset"]
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    restart: "no"
+
+  jobmanager:
+    platform: ${BEAM_PLATFORM:-linux/amd64}
+    build:
+      context: .
+      dockerfile: docker/flink/Dockerfile
+    command: jobmanager
+    ports:
+      - "8081:8081"
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: jobmanager
+        jobmanager.memory.process.size: 768m
+        parallelism.default: ${BEAM_PARALLELISM:-2}
+    volumes:
+      - beam-artifacts:/tmp/beam-artifact-staging
+    mem_limit: 900m
+
+  taskmanager:
+    platform: ${BEAM_PLATFORM:-linux/amd64}
+    build:
+      context: .
+      dockerfile: docker/flink/Dockerfile
+    command: taskmanager
+    depends_on:
+      - jobmanager
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: jobmanager
+        taskmanager.numberOfTaskSlots: 1
+        taskmanager.memory.process.size: 1536m
+        taskmanager.memory.task.off-heap.size: 384m
+        taskmanager.memory.managed.fraction: 0.1
+        taskmanager.memory.network.min: 64m
+        taskmanager.memory.network.max: 64m
+        parallelism.default: ${BEAM_PARALLELISM:-2}
+        taskmanager.load-balance.mode: SLOTS
+    volumes:
+      - beam-artifacts:/tmp/beam-artifact-staging
+    deploy:
+      replicas: 2
+    mem_limit: 2800m
+
+  beam-job-server:
+    platform: ${BEAM_PLATFORM:-linux/amd64}
+    image: apache/beam_flink1.19_job_server:2.74.0
+    command:
+      - --flink-master=jobmanager:8081
+      - --job-host=beam-job-server
+      - --flink-conf-dir=/flink-conf
+    volumes:
+      - ./docker/flink:/flink-conf:ro
+      - beam-artifacts:/tmp/beam-artifact-staging
+    ports:
+      - "8099:8099"
+    depends_on:
+      - jobmanager
+      - taskmanager
+    mem_limit: 900m
+
+  pipeline:
+    <<: *notebook
+    command: ["/app/.venv/bin/python", "-m", "apu_streaming.pipeline"]
+    depends_on:
+      dataset-init:
+        condition: service_completed_successfully
+      beam-job-server:
+        condition: service_started
+    restart: on-failure
+
+  producer:
+    <<: *notebook
+    command: ["/app/.venv/bin/python", "-m", "apu_streaming.producer", "--scenario", "adverse"]
+    depends_on:
+      dataset-init:
+        condition: service_completed_successfully
+    restart: "no"
+
+  materializer:
+    <<: *notebook
+    command: ["/app/.venv/bin/python", "-m", "apu_streaming.consumer", "--idle-timeout", "0"]
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  dashboard:
+    <<: *notebook
+    command: ["/app/.venv/bin/marimo", "run", "dashboard_notebook.py", "--host", "0.0.0.0", "--port", "2718"]
+    ports:
+      - "2718:2718"
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+
+  smoke:
+    <<: *notebook
+    profiles: ["smoke"]
+    command: ["/app/.venv/bin/python", "scripts/smoke.py"]
+    depends_on:
+      dataset-init:
+        condition: service_completed_successfully
+      beam-job-server:
+        condition: service_started
+    restart: "no"
+
+volumes:
+  kafka-data:
+  beam-artifacts:
