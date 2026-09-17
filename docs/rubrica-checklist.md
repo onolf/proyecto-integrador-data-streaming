@@ -69,7 +69,7 @@ evidencia concreta dentro de este repositorio. Estado al commit `HEAD` de
 | Escenario con tardío/desordenado + evidencia | `test_late_event_within_lateness_…`, `test_parse_and_admit_rejects_beyond_horizon_…` | ✔ |
 | Smoke test fuente → … → salida | `scripts/smoke.py`: sample real → ParseAndAdmit → Beam (DirectRunner) vs oráculo (45 ventanas) → sink idempotente (doble aplicación, conteo estable) | ✔ (`"ok": true`) |
 | Demostración con Docker | `make run` + `make smoke` (perfil compose) + dashboard en :2718 | Requiere Docker Desktop corriendo |
-| Observabilidad | Métricas Beam (`admitted`, `quarantined`, `duplicates_dropped`, `dropped_by_horizon`) + `scripts/check_health.py` (Kafka + frescura de serving.db) + logs por servicio | `transforms.py`, `scripts/check_health.py` |
+| Observabilidad | Métricas Beam (`admitted`, `quarantined`, `duplicates_dropped`, `dropped_by_horizon`) + `scripts/check_health.py` (separación de flota sobre serving.db) + logs por servicio | `transforms.py`, `scripts/check_health.py` |
 
 ## Criterio 7 · Documentación y presentación (10 %)
 
@@ -91,7 +91,7 @@ docker compose config --quiet               # 4. compose válido
 uv run marimo check --strict dashboard_notebook.py   # 5. dashboard válido
 uv run python scripts/smoke.py              # 6. smoke offline → "ok": true
 docker compose up --build                   # 7. stack completo (requiere Docker)
-uv run python scripts/check_health.py       # 8. probe Kafka + serving.db
+uv run python scripts/check_health.py       # 8. separación de flota (post compose)
 ```
 
 ## Brechas conocidas / límites declarados
@@ -100,5 +100,19 @@ uv run python scripts/check_health.py       # 8. probe Kafka + serving.db
   upstream en `ParseAndAdmit`; el DirectRunner no descarta elementos tardíos a
   nivel de ventana (limitación documentada del runner, no del pipeline). En
   Flink la ventana sí expira según `allowed_lateness`.
-- El smoke de compose (`make smoke`) requiere Docker Desktop; el smoke local
-  (`scripts/smoke.py`) cubre el recorrido sin el broker.
+- `is_last = 1` nunca llega a materializarse con el trigger configurado
+  (`AfterWatermark` + refiring tardío): el verificador de salida lee la fila
+  almacenada, que por RN-06 ya es el pane más reciente de cada `aggregate_id`.
+- `tests/test_windows_teststream.py` corre con `streaming_triggers=False` y no
+  asserta `pane_index`/`pane_timing`; la secuencia E1–E9 del plan con
+  `streaming = True` y pane LATE de corrección queda pendiente.
+- El smoke de adversos en compose del plan (tópicos efímeros, 5 aserciones:
+  cuarentena ≥ 1, too_late ≥ 1, `duplicates_dropped > 0`, etc.) aún no está
+  implementado; `scripts/smoke.py` es el smoke offline DirectRunner y reporta
+  `quarantined: 0` porque no inyecta payloads rotos.
+- `tests/test_dedup_state.py` no cubre la expiración del estado por timer de
+  watermark (re-admisión del mismo `event_id` tras `window.end + lateness`).
+- El recorrido completo sobre Docker (`docker compose up --build` + pipeline
+  en Flink + verificador) no se ejecutó en esta sesión; la separación de
+  flota sí quedó probada sobre DirectRunner con el dataset completo
+  (34.808 lecturas → 1.440 agregados; veredicto OK).

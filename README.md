@@ -84,16 +84,19 @@ uv run python scripts/smoke.py --max-readings 600 # local, sin docker
 Salida JSON con totales (`admitted`, `quarantined`, `too_late`), comparación
 de claves Beam vs oráculo y verificación de idempotencia del sink.
 
-### Health check del stack
+### Verificador de salida (separación de flota)
 
 ```bash
-uv run python scripts/check_health.py                      # Kafka + serving.db
-uv run python scripts/check_health.py --skip-kafka         # solo serving.db
-uv run python scripts/check_health.py --max-staleness-seconds 300
+uv run python scripts/check_health.py                      # lee data/serving.db
+uv run python scripts/check_health.py --db-path otra.db    # ruta alternativa
 ```
 
-Exit 0 solo si el broker responde con los topics esperados **y** el serving DB
-tiene filas frescas (`MAX(updated_at)` dentro del presupuesto de staleness).
+Lee las filas `apu_health_indicator` materializadas (cada fila ya es el pane
+más reciente por upsert) e imprime la tabla
+`asset_id / running_ratio / oil_temperature_mean / air_leak_suspected`. Sale
+con código 1 si `apu-04/05/06` no quedan en `true` y `apu-01/02/03` en
+`false`, o si los seis activos caen del mismo lado del umbral — es la prueba
+de que umbral, agregación y ventanas funcionan end-to-end.
 
 ### Dashboard
 
@@ -136,7 +139,7 @@ src/apu_streaming/
   serving.py      Sink SQLite idempotente (upsert monotone por pane_index)
 scripts/
   smoke.py        E2E offline: sample → Beam vs oráculo → sink
-  check_health.py Probe operativo: Kafka + frescura del serving.db
+  check_health.py Verificador de la salida: separación de flota en serving.db
 dashboard_notebook.py   Dashboard marimo de 4 paneles
 docker-compose.yml      kafka, kafka-init, flink (jm/tm), beam-job-server,
                         pipeline, producer, materializer, dashboard, smoke
