@@ -28,6 +28,15 @@ make run              # levanta kafka + flink + pipeline + producer + materializ
 El dashboard queda en <http://localhost:2718> una vez que `materializer` haya
 empezado a poblar `data/serving.db`.
 
+## Puertos expuestos
+
+| Puerto | Servicio | Qué muestra |
+| --- | --- | --- |
+| `2718` | `dashboard` | Dashboard marimo (4 paneles de evidencia) |
+| `8081` | `jobmanager` | Flink Web UI: job, checkpoints, métricas del pipeline |
+| `8099` | `beam-job-server` | Endpoint de sumisión de jobs Beam (uso interno) |
+| `29092` | `kafka` | Broker expuesto al host |
+
 ## Arranque detallado (sin make)
 
 ```bash
@@ -39,7 +48,7 @@ docker compose up --build                  # stack completo
 Para el smoke **sin Docker** (offline, DirectRunner local):
 
 ```bash
-uv run python scripts/smoke.py --max-readings 1500
+uv run python scripts/smoke_offline.py --max-readings 1500
 ```
 
 Reproduce `data/sample/apu_fleet_sample.jsonl` por `ParseAndAdmit`, corre el
@@ -125,10 +134,34 @@ docker compose config --quiet   # valida el compose sin levantarlo
 ```
 
 Verificación de paridad Beam↔oráculo cubierta en `tests/test_transforms.py` y
-en `scripts/smoke.py`; comportamiento temporal (watermark, late, ventana
-adyacente) en `tests/test_windows_teststream.py`; semántica de estado del dedup
-en `tests/test_dedup_state.py`; idempotencia RN-06 del sink en
+en `scripts/smoke_offline.py`; comportamiento temporal (watermark, secuencia
+E1–E9 con panes EARLY/ON_TIME/LATE, ventana adyacente) en
+`tests/test_windows_teststream.py`; semántica de estado del dedup y expiración
+por timer en `tests/test_dedup_state.py`; idempotencia RN-06 del sink en
 `tests/test_serving.py`.
+
+### Inspección de tópicos (con el stack levantado)
+
+```bash
+# cuarentena: eventos que violan el contrato
+docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server kafka:9092 --topic sensor.readings.quarantine \
+  --from-beginning --timeout-ms 10000
+
+# too_late: eventos rechazados por el horizonte upstream
+docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server kafka:9092 --topic sensor.readings.too_late \
+  --from-beginning --timeout-ms 10000
+
+# features.asset: aggregate_id repetido con pane_index creciente = corrección
+docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server kafka:9092 --topic features.asset \
+  --from-beginning --timeout-ms 10000 --property print.key=true
+```
+
+En la Flink Web UI (`http://localhost:8081`) los contadores `admitted`,
+`quarantined`, `dropped_by_horizon` y `duplicates_dropped` deben aparecer en
+las métricas del job.
 
 ## Estructura
 
@@ -176,3 +209,27 @@ docs/rfc-001-apu-streaming.md   RFC con decisiones RN-xx
   solo lee `data/serving.db`; el `materializer` es quien lo pobla.
 - Kafka no arranca tras hibernación en Windows: `docker compose down -v` y
   levantar de nuevo (volumen `kafka-data` queda con offsets viejos).
+
+## Datos y atribución
+
+Dataset: **MetroPT-3**, UCI Machine Learning Repository id 791, DOI
+`10.24432/C5VW3R`, licencia **CC BY 4.0** — Davari, Veloso, Ribeiro & Gama
+(2021). El repo versiona solo una muestra derivada
+(`data/sample/apu_fleet_sample.jsonl`, ver `data/sample/ATRIBUCION.md`); el
+ZIP completo se descarga con `make dataset`.
+
+Los 6 activos (`apu-01..06`) son una **síntesis explícita** de un solo APU
+físico mediante tramos temporales disjuntos — declarado en el RFC §1, no se
+presenta como flota real.
+
+## Integrantes y contribuciones
+
+Equipo individual — **Odilón Nolf Sánchez** (`onolf@outlook.com`):
+
+- Continuidad de `tarea1.pdf`/`tarea2.pdf` (arquitectura Kafka y política
+  temporal diseñadas previamente).
+- Diseño del contrato de eventos y calibración de umbrales sobre MetroPT-3.
+- Implementación completa: síntesis de flota, productor de replay, pipeline
+  Beam, sink idempotente, dashboard, pruebas (incluida E1–E9 con TestStream),
+  smokes offline/compose, documentación.
+

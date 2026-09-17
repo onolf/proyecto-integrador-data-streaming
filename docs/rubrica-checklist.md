@@ -111,3 +111,27 @@ uv run python scripts/check_health.py       # 8. separación de flota (post comp
   en Flink + verificador) no se ejecutó en esta sesión; la separación de
   flota sí quedó probada sobre DirectRunner con el dataset completo
   (34.808 lecturas → 1.440 agregados; veredicto OK).
+
+## Verificación de descriptores (logro destacado)
+
+| Descriptor exigido (rúbrica §6) | Evidencia en este repo |
+| --- | --- |
+| 1: decisiones ligadas al dominio, diagrama claro | RFC §1 (maint. anticipado, usuario=planta), umbrales calibrados sobre tramos medidos; diagrama mermaid consistente con compose |
+| 2: contrato versionado, claves/particiones por orden/paralelismo/skew | `contracts.py` (v1/v2, rechazo por motivo estable); RFC §4 analiza orden por `asset_id`, 6 particiones vs paralelismo 2 y el skew del tramo apu-06 |
+| 3: pipeline modular, salidas laterales, combinadores incrementales | `transforms.py`: ParseAndAdmit (3 salidas), 2 CombineFn incrementales asociativos probados |
+| 4: política temporal completa y probada | E1–E9 con `TestStream` + `streaming=True`: panes EARLY/ON_TIME/LATE con pane_index monótono y corrección por E6 |
+| 5: dedup con horizonte explícito, sink idempotente, sin sobreprometer | `DeduplicateReadings` con timer `window.end + lateness` (test de expiración); RN-06 upsert monótono; RFC §7 declara no-exactly-once |
+| 6: cobertura de lógica/ventanas/fallos, escenarios reproducibles, evidencia E2E verificable | 52 tests; productor determinista por seed; dos smokes; verificador de flota con caso negativo probado |
+| 7: documentación precisa, operación de un comando, contribuciones | README completo (quickstart, puertos, inspección, troubleshooting, atribución); integrantes aquí y en RFC §final |
+
+## Prueba de reproducibilidad externa
+
+Pendiente de registro tras la corrida con Docker (pasos 7–8 de la sección
+anterior). El protocolo queda fijado acá: clonar en directorio limpio, seguir
+solo el README, registrar el resultado en esta tabla:
+
+| Paso | Comando/README | Resultado registrado | Fecha |
+| --- | --- | --- | --- |
+| Clonar + levantar | `git clone … && docker compose up --build` | pendiente | — |
+| Verificar salida | `uv run python scripts/check_health.py` | pendiente | — |
+| Smoke adverso | `make smoke` | pendiente | — |
