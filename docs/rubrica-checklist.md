@@ -67,8 +67,8 @@ evidencia concreta dentro de este repositorio. Estado al commit `HEAD` de
 | Prueba de ventanas con TestStream | `tests/test_windows_teststream.py` | ✔ |
 | Escenario con duplicado + evidencia | `test_duplicate_event_id_is_dropped_within_the_same_window` + escenario `adverse` del productor | ✔ |
 | Escenario con tardío/desordenado + evidencia | `test_late_event_within_lateness_…`, `test_parse_and_admit_rejects_beyond_horizon_…` | ✔ |
-| Smoke test fuente → … → salida | `scripts/smoke.py`: sample real → ParseAndAdmit → Beam (DirectRunner) vs oráculo (45 ventanas) → sink idempotente (doble aplicación, conteo estable) | ✔ (`"ok": true`) |
-| Demostración con Docker | `make run` + `make smoke` (perfil compose) + dashboard en :2718 | Requiere Docker Desktop corriendo |
+| Smoke test fuente → … → salida | Doble: `scripts/smoke_offline.py` (DirectRunner vs oráculo, 45 ventanas, sink idempotente) y `scripts/smoke.py` (compose: tópicos efímeros, escenario adverse, 5 aserciones adversas) | offline ✔ (`"ok": true`); compose pendiente de corrida con Docker |
+| Demostración con Docker | `make run` + `make smoke` (perfil compose) + dashboard en :2718 + `scripts/check_health.py` | Requiere Docker Desktop corriendo |
 | Observabilidad | Métricas Beam (`admitted`, `quarantined`, `duplicates_dropped`, `dropped_by_horizon`) + `scripts/check_health.py` (separación de flota sobre serving.db) + logs por servicio | `transforms.py`, `scripts/check_health.py` |
 
 ## Criterio 7 · Documentación y presentación (10 %)
@@ -89,7 +89,7 @@ uv run pytest -q                            # 2. 50 tests verdes
 uv run ruff check .                         # 3. lint limpio
 docker compose config --quiet               # 4. compose válido
 uv run marimo check --strict dashboard_notebook.py   # 5. dashboard válido
-uv run python scripts/smoke.py              # 6. smoke offline → "ok": true
+uv run python scripts/smoke_offline.py      # 6. smoke offline → "ok": true
 docker compose up --build                   # 7. stack completo (requiere Docker)
 uv run python scripts/check_health.py       # 8. separación de flota (post compose)
 ```
@@ -103,10 +103,10 @@ uv run python scripts/check_health.py       # 8. separación de flota (post comp
 - `is_last = 1` nunca llega a materializarse con el trigger configurado
   (`AfterWatermark` + refiring tardío): el verificador de salida lee la fila
   almacenada, que por RN-06 ya es el pane más reciente de cada `aggregate_id`.
-- El smoke de adversos en compose del plan (tópicos efímeros, 5 aserciones:
-  cuarentena ≥ 1, too_late ≥ 1, `duplicates_dropped > 0`, etc.) aún no está
-  implementado; `scripts/smoke.py` es el smoke offline DirectRunner y reporta
-  `quarantined: 0` porque no inyecta payloads rotos.
+- El smoke adverso de compose (`scripts/smoke.py`, tópicos efímeros, 5
+  aserciones) está implementado pero no se ejecutó en esta sesión: requiere el
+  stack Docker completo. El smoke offline (`scripts/smoke_offline.py`) sí se
+  corre y pasa.
 - El recorrido completo sobre Docker (`docker compose up --build` + pipeline
   en Flink + verificador) no se ejecutó en esta sesión; la separación de
   flota sí quedó probada sobre DirectRunner con el dataset completo

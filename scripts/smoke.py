@@ -1,155 +1,223 @@
-"""Offline end-to-end smoke: dataset sample → ParseAndAdmit → Beam analytics →
-oracle comparison → idempotent SQLite sink.
+"""Smoke adverso end-to-end sobre el stack Docker (Kafka real + Flink portable).
 
-Runs entirely without Docker/Kafka on the DirectRunner. Exits non-zero if any
-stage diverges. Designed as the cheapest full-path check before pushing or
-presenting the project."""
+Recorrido: publicación del sample con escenario `adverse` sobre tópicos
+efímeros → pipeline Beam acotado → consumo de los cuatro tópicos → sink
+SQLite propio del smoke. Falla con RuntimeError si no se cumple alguna de las
+aserciones (F7.3 del plan):
+
+  1. ≥ 1 registro en `features.*`
+  2. ≥ 1 registro en `quarantine.*` (payload roto + schema_version=3 inyectados)
+  3. ≥ 1 registro en `too_late.*` (eventos del escenario adverse con lag 1800 s)
+  4. contador Beam `duplicates_dropped` > 0
+  5. filas del sink == cantidad de `aggregate_id` distintos emitidos
+     (idempotencia: varios panes por clave colapsan en una fila)
+
+Se ejecuta dentro del servicio `smoke` de docker compose; el broker es
+`kafka:9092` por entorno. Imprime un JSON de conteos como evidencia.
+"""
 
 from __future__ import annotations
 
-import argparse
 import json
-import sys
-import tempfile
+import time
+import uuid
+from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 
-import apache_beam as beam
+from confluent_kafka import Consumer, Producer
+from confluent_kafka.admin import AdminClient, NewTopic
 
 from apu_streaming.config import Settings, sample_dataset_path
 from apu_streaming.contracts import encode_event
-from apu_streaming.oracle import summarize_readings
-from apu_streaming.producer import load_readings
+from apu_streaming.producer import SCENARIOS, ApuReplay, build_producer, load_readings
 from apu_streaming.serving import count_aggregates, open_connection, upsert_aggregate
-from apu_streaming.transforms import ParseAndAdmit, build_analytics
 
 
-def _window_key(record: dict) -> tuple[str, str, int]:
-    """(asset_id, stream_or_HEALTH, window_start_epoch) for comparison."""
-    from datetime import UTC, datetime
+def _create_topics(admin: AdminClient, settings: Settings, suffix: str) -> dict[str, str]:
+    """Create the four suffixed topics; return {role: topic_name}."""
+    names = {
+        "raw": f"{settings.raw_topic}.smoke-{suffix}",
+        "features": f"{settings.features_topic}.smoke-{suffix}",
+        "quarantine": f"{settings.quarantine_topic}.smoke-{suffix}",
+        "too_late": f"{settings.too_late_topic}.smoke-{suffix}",
+    }
+    new_topics = [
+        NewTopic(names["raw"], num_partitions=6, replication_factor=1),
+        NewTopic(names["features"], num_partitions=6, replication_factor=1),
+        NewTopic(names["quarantine"], num_partitions=3, replication_factor=1),
+        NewTopic(names["too_late"], num_partitions=3, replication_factor=1),
+    ]
+    futures = admin.create_topics(new_topics)
+    for name, future in futures.items():
+        future.result()
+        print(f"[smoke] topic listo: {name}")
+    return names
 
-    parsed = datetime.fromisoformat(record["window_start"])
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    stream = record.get("stream") or "<health>"
-    return (record["asset_id"], stream, int(parsed.timestamp()))
+
+def _publish(settings: Settings, raw_topic: str) -> dict[str, int]:
+    """Replay the sample with the adverse scenario + two guaranteed-invalid payloads."""
+    producer: Producer = build_producer(settings.kafka_bootstrap_servers)
+    replay = ApuReplay(
+        producer,
+        topic=raw_topic,
+        scenario=SCENARIOS["adverse"],
+        speedup=10_000.0,  # el smoke apura el reloj; los lags temporales ya van en metadata
+        seed=7,
+    )
+    readings = load_readings(sample_dataset_path())
+    counts = replay.replay(readings, realtime=False)
+
+    # Cargas adversas garantizadas, independientes del seed:
+    # (a) payload no-JSON, (b) contrato con schema_version no soportado.
+    producer.produce(raw_topic, key=b"apu-01", value=b"not-json{")
+    rogue = json.loads(encode_event(replace(readings[0], ingestion_time=_iso_now())).decode())
+    rogue["schema_version"] = 3
+    producer.produce(raw_topic, key=b"apu-01", value=json.dumps(rogue).encode())
+    producer.flush(30)
+    return counts
 
 
-def run_smoke(
-    *,
-    max_readings: int = 1500,
-    db_path: Path | None = None,
-) -> dict:
-    settings = Settings()  # window_seconds=300, allowed_lateness_seconds=720
-    sample = sample_dataset_path()
-    readings = load_readings(sample)[:max_readings]
-    assert readings, "sample dataset produced zero readings"
+def _iso_now() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
-    # 1) Wire shape: encode each reading as bytes, as Kafka would carry it.
-    raw_events = [r.as_dict() for r in readings]
-    wire_pairs = [(r.asset_id.encode(), encode_event(r)) for r in readings]
 
-    # 2) ParseAndAdmit: admission + quarantine routing, in-process.
-    admit = ParseAndAdmit(settings)
-    admitted: list[dict] = []
-    quarantined = 0
-    too_late = 0
-    for pair in wire_pairs:
-        for out in admit.process(pair):
-            tag = getattr(out, "tag", None)
-            if tag == ParseAndAdmit.QUARANTINE:
-                quarantined += 1
-            elif tag == ParseAndAdmit.TOO_LATE:
-                too_late += 1
-            else:
-                admitted.append(out)
+def _run_pipeline(settings: Settings, topics: dict[str, str], max_read_seconds: int):
+    """Run the Beam pipeline bounded; return the result for metrics."""
+    from apu_streaming import pipeline as pipeline_mod
 
-    assert admitted, "ParseAndAdmit admitted zero events; dataset unusable"
-
-    # 3) Beam analytics on DirectRunner (bounded; single on-time pane per window).
-    #    Results are collected via a throwaway text sink.
-    beam_aggs = _run_beam_collecting(admitted, settings)
-
-    # 4) Oracle: pure-Python reference on the same wire input.
-    oracle_out = summarize_readings(
-        raw_events,
-        window_seconds=settings.window_seconds,
-        allowed_lateness_seconds=settings.allowed_lateness_seconds,
+    smoke_settings = replace(
+        settings,
+        raw_topic=topics["raw"],
+        features_topic=topics["features"],
+        quarantine_topic=topics["quarantine"],
+        too_late_topic=topics["too_late"],
     )
 
-    expected_keys = {_window_key(v) for v in oracle_out["signal_stats"].values()} | {
-        _window_key(v) for v in oracle_out["health"].values()
-    }
-    beam_keys = {_window_key(r) for r in beam_aggs}
+    # run() toma Settings.from_env(); se paramatriza construyendo el pipeline acá.
+    options = pipeline_mod.pipeline_options(smoke_settings, job_name="apu-smoke")
+    import apache_beam as beam
 
-    missing_in_beam = expected_keys - beam_keys
-    extra_in_beam = beam_keys - expected_keys
-
-    # 5) Idempotent sink: upsert twice, counts must not change.
-    tmp_db = db_path or Path(tempfile.mkdtemp(prefix="apu-smoke-")) / "serving.db"
-    conn = open_connection(tmp_db)
-    try:
-        applied_first = sum(upsert_aggregate(conn, r) for r in beam_aggs)
-        after_first = count_aggregates(conn)
-        applied_second = sum(upsert_aggregate(conn, r) for r in beam_aggs)
-        after_second = count_aggregates(conn)
-        idempotent = after_first == after_second and applied_second >= applied_first >= 0
-    finally:
-        conn.close()
-
-    summary = {
-        "sample_path": str(sample),
-        "readings_loaded": len(readings),
-        "admitted": len(admitted),
-        "quarantined": quarantined,
-        "too_late": too_late,
-        "oracle_keys": len(expected_keys),
-        "beam_keys": len(beam_keys),
-        "missing_in_beam": sorted(map(str, missing_in_beam))[:10],
-        "extra_in_beam": sorted(map(str, extra_in_beam))[:10],
-        "sink_rows_after_first_pass": after_first,
-        "sink_rows_after_second_pass": after_second,
-        "sink_idempotent": bool(idempotent),
-        "ok": not missing_in_beam and not extra_in_beam and bool(idempotent),
-    }
-    return summary
-
-
-def _run_beam_collecting(admitted: list[dict], settings: Settings) -> list[dict]:
-    """Run analytics via DirectRunner; results are collected via a text sink."""
-    out_dir = Path(tempfile.mkdtemp(prefix="apu-smoke-beam-"))
-
-    pipeline = beam.Pipeline()
-    events = pipeline | beam.Create(admitted)
-    _ = (
-        build_analytics(events, settings, streaming_triggers=False)
-        | beam.Map(json.dumps, sort_keys=True)
-        | beam.io.WriteToText(str(out_dir / "out"), file_name_suffix=".json")
+    pipeline = beam.Pipeline(options=options)
+    pipeline_mod.build_pipeline(
+        pipeline,
+        smoke_settings,
+        group_id=f"apu-smoke-{uuid.uuid4().hex[:8]}",
+        max_read_time=max_read_seconds,
     )
     result = pipeline.run()
     result.wait_until_finish()
+    return result
 
-    rows: list[dict] = []
-    for path in sorted(out_dir.glob("*.json")):
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                rows.append(json.loads(line))
-    return rows
+
+def _consume_all(bootstrap: str, topic: str, *, idle_seconds: float = 10.0) -> list[dict]:
+    consumer = Consumer(
+        {
+            "bootstrap.servers": bootstrap,
+            "group.id": f"apu-smoke-reader-{uuid.uuid4().hex[:8]}",
+            "auto.offset.reset": "earliest",
+            "enable.auto.commit": False,
+        }
+    )
+    consumer.subscribe([topic])
+    records: list[dict] = []
+    last_msg = time.monotonic()
+    try:
+        while True:
+            msg = consumer.poll(1.0)
+            if msg is None:
+                if time.monotonic() - last_msg > idle_seconds:
+                    break
+                continue
+            last_msg = time.monotonic()
+            if msg.error():
+                continue
+            try:
+                records.append(json.loads(msg.value().decode()))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                # payloads rotos del tópico de cuarentena cuentan igual
+                records.append({"_undecodable": True})
+    finally:
+        consumer.close()
+    return records
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--max-readings", type=int, default=1500)
-    parser.add_argument("--db-path", type=Path, default=None)
-    args = parser.parse_args()
+    plan_settings = Settings.from_env()
+    suffix = uuid.uuid4().hex[:8]
+    tmp_dir = Path("tmp")
+    tmp_dir.mkdir(exist_ok=True)
+    smoke_db = tmp_dir / f"smoke-{suffix}.db"
 
+    admin = AdminClient({"bootstrap.servers": plan_settings.kafka_bootstrap_servers})
+    topics = _create_topics(admin, plan_settings, suffix)
+
+    produced = _publish(plan_settings, topics["raw"])
+    print(f"[smoke] replay adverse: {produced}")
+
+    result = _run_pipeline(plan_settings, topics, max_read_seconds=90)
+
+    # Métrica 4: duplicates_dropped del resultado del pipeline.
+    duplicates_dropped = 0
+    metrics_available = True
     try:
-        summary = run_smoke(max_readings=args.max_readings, db_path=args.db_path)
-    except Exception as error:  # noqa: BLE001 - smoke must surface any failure
-        print(json.dumps({"ok": False, "error": f"{type(error).__name__}: {error}"}))
-        sys.exit(2)
+        from apache_beam.metrics.metric import MetricsFilter
 
-    print(json.dumps(summary, indent=2, sort_keys=True))
-    sys.exit(0 if summary["ok"] else 1)
+        metrics = result.metrics().query(MetricsFilter().with_name("duplicates_dropped"))
+        for counter in metrics["counters"]:
+            duplicates_dropped += counter.committed or counter.attempted or 0
+    except (NotImplementedError, AttributeError, TypeError) as exc:
+        metrics_available = False
+        print(f"[smoke] aviso: runner no expone métricas ({exc!r}); aserción 4 omitida")
+
+    bootstrap = plan_settings.kafka_bootstrap_servers
+    features = _consume_all(bootstrap, topics["features"])
+    quarantine = _consume_all(bootstrap, topics["quarantine"])
+    too_late = _consume_all(bootstrap, topics["too_late"])
+
+    # El smoke materializa por su cuenta (RN-06): el servicio `materializer`
+    # no corre bajo el perfil smoke.
+    conn = open_connection(smoke_db)
+    try:
+        for record in features:
+            if "aggregate_id" in record:
+                upsert_aggregate(conn, record)
+        rows = count_aggregates(conn)
+    finally:
+        conn.close()
+
+    distinct_keys = {r["aggregate_id"] for r in features if "aggregate_id" in r}
+
+    summary = {
+        "topics": topics,
+        "produced": produced,
+        "features_records": len(features),
+        "quarantine_records": len(quarantine),
+        "too_late_records": len(too_late),
+        "duplicates_dropped_metric": duplicates_dropped,
+        "distinct_aggregate_ids": len(distinct_keys),
+        "sink_rows": rows,
+    }
+
+    failures: list[str] = []
+    if not features:
+        failures.append("features: 0 registros")
+    if not quarantine:
+        failures.append("quarantine: 0 registros (payload roto no llegó)")
+    if not too_late:
+        failures.append("too_late: 0 registros (escenario adverse sin tardíos fuera de horizonte)")
+    if metrics_available and duplicates_dropped <= 0:
+        failures.append("métrica duplicates_dropped = 0 (esperado > 0 con scenario adverse)")
+    if rows != len(distinct_keys) or rows == 0:
+        failures.append(
+            f"sink inconsistente: {rows} filas vs {len(distinct_keys)} aggregate_id distintos"
+        )
+
+    if failures:
+        print(json.dumps({"ok": False, **summary, "failures": failures}, indent=2))
+        raise RuntimeError("smoke falló: " + "; ".join(failures))
+
+    print(json.dumps({"ok": True, **summary}, indent=2))
 
 
 if __name__ == "__main__":

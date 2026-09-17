@@ -74,15 +74,21 @@ Overrides por entorno (ver `Settings.from_env`):
 
 ## Operación
 
-### Smoke check
+### Smoke checks
 
 ```bash
-make smoke                                        # en docker
-uv run python scripts/smoke.py --max-readings 600 # local, sin docker
+# offline, sin Docker: DirectRunner vs oráculo + sink idempotente
+uv run python scripts/smoke_offline.py --max-readings 600
+
+# adverso, sobre el stack real: `make smoke` levanta el perfil smoke
+docker compose --profile smoke up --build --abort-on-container-exit --exit-code-from smoke smoke
 ```
 
-Salida JSON con totales (`admitted`, `quarantined`, `too_late`), comparación
-de claves Beam vs oráculo y verificación de idempotencia del sink.
+`scripts/smoke.py` (compose) crea tópicos efímeros con sufijo uuid, publica el
+sample con el escenario `adverse` más payloads inválidos, corre el pipeline
+acotado y verifica: features ≥ 1, cuarentena ≥ 1, too_late ≥ 1,
+`duplicates_dropped > 0`, y que las filas materializadas igualan los
+`aggregate_id` distintos (idempotencia).
 
 ### Verificador de salida (separación de flota)
 
@@ -138,7 +144,8 @@ src/apu_streaming/
   consumer.py     materializer: features.asset → serving.db (+ AggregateStore)
   serving.py      Sink SQLite idempotente (upsert monotone por pane_index)
 scripts/
-  smoke.py        E2E offline: sample → Beam vs oráculo → sink
+  smoke_offline.py E2E offline: sample → Beam vs oráculo → sink
+  smoke.py        E2E adverso en compose: tópicos efímeros, 5 aserciones
   check_health.py Verificador de la salida: separación de flota en serving.db
 dashboard_notebook.py   Dashboard marimo de 4 paneles
 docker-compose.yml      kafka, kafka-init, flink (jm/tm), beam-job-server,
