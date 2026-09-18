@@ -11,9 +11,9 @@ FEATURES_TOPIC = "features.asset"
 QUARANTINE_TOPIC = "sensor.readings.quarantine"
 TOO_LATE_TOPIC = "sensor.readings.too_late"
 
-# Umbrales de dominio calibrados sobre los datos reales de MetroPT-3 (ver RFC
-# sección "Métrica de dominio"): apu-01/02/03 (sanos) miden running_ratio en
-# 0.270-0.628 y oil_temperature_mean en 55.78-66.57 °C; apu-04/05/06 (falla de
+# Umbrales de dominio calibrados sobre los datos reales de MetroPT-3:
+# apu-01/02/03 (sanos) miden running_ratio en 0.270-0.628 y
+# oil_temperature_mean en 55.78-66.57 °C; apu-04/05/06 (falla de
 # fuga de aire) miden 0.999-1.000 y 75.00-83.64 °C respectivamente.
 MOTOR_RUNNING_THRESHOLD_A = 1.0
 RUNNING_RATIO_ALERT = 0.95

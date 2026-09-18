@@ -16,17 +16,21 @@ justificación de cada decisión viven en
 - Python 3.12+ con [`uv`](https://docs.astral.sh/uv/)
 - Docker Desktop (para el stack completo: Kafka + Flink + Beam job server)
 
-## Quickstart
+## Quickstart (uv + Docker)
+
+Desde este directorio:
 
 ```bash
-make install          # uv sync: crea .venv y fija dependencias de uv.lock
-make dataset          # descarga MetroPT-3, sintetiza flota de 6 activos
-make smoke            # smoke E2E en docker (perfil smoke) — ver sección abajo
-make run              # levanta kafka + flink + pipeline + producer + materializer + dashboard
+uv sync                                               # crea .venv y fija dependencias de uv.lock
+uv run pytest -q                                      # 52 tests, línea base local
+uv run python -m apu_streaming.dataset                # una sola vez; reutiliza data/cache
+uv run python scripts/smoke_offline.py --max-readings 600   # E2E offline sin Docker
+docker compose up --build                             # stack completo
 ```
 
 El dashboard queda en <http://localhost:2718> una vez que `materializer` haya
-empezado a poblar `data/serving.db`.
+empezado a poblar `data/serving.db`. Detalle de cada paso en
+[Operación](#operación) y [Tests y validación](#tests-y-validación).
 
 ## Puertos expuestos
 
@@ -36,25 +40,6 @@ empezado a poblar `data/serving.db`.
 | `8081` | `jobmanager` | Flink Web UI: job, checkpoints, métricas del pipeline |
 | `8099` | `beam-job-server` | Endpoint de sumisión de jobs Beam (uso interno) |
 | `29092` | `kafka` | Broker expuesto al host |
-
-## Arranque detallado (sin make)
-
-```bash
-uv sync
-uv run python -m apu_streaming.dataset     # una sola vez; usa data/cache
-docker compose up --build                  # stack completo
-```
-
-Para el smoke **sin Docker** (offline, DirectRunner local):
-
-```bash
-uv run python scripts/smoke_offline.py --max-readings 1500
-```
-
-Reproduce `data/sample/apu_fleet_sample.jsonl` por `ParseAndAdmit`, corre el
-DAG de `build_analytics`, compara contra el oráculo puro
-(`apu_streaming.oracle.summarize_readings`) y verifica la idempotencia del sink
-aplicando los agregados dos veces. Exit 0 si todo cuadra.
 
 ## Topología de topics
 
@@ -87,11 +72,17 @@ Overrides por entorno (ver `Settings.from_env`):
 
 ```bash
 # offline, sin Docker: DirectRunner vs oráculo + sink idempotente
+# --max-readings 600 es la pasada rápida; el default sin flag es 1500
 uv run python scripts/smoke_offline.py --max-readings 600
 
-# adverso, sobre el stack real: `make smoke` levanta el perfil smoke
+# adverso, sobre el stack real: levanta el perfil smoke
 docker compose --profile smoke up --build --abort-on-container-exit --exit-code-from smoke smoke
 ```
+
+El smoke offline reproduce `data/sample/apu_fleet_sample.jsonl` por
+`ParseAndAdmit`, corre el DAG de `build_analytics`, compara contra el oráculo
+puro (`apu_streaming.oracle.summarize_readings`) y verifica la idempotencia
+del sink aplicando los agregados dos veces. Exit 0 si todo cuadra.
 
 `scripts/smoke.py` (compose) crea tópicos efímeros con sufijo uuid, publica el
 sample con el escenario `adverse` más payloads inválidos, corre el pipeline
@@ -127,9 +118,9 @@ panes (early/on-time/late), contadores de cuarentena y duplicados.
 ## Tests y validación
 
 ```bash
-make test            # uv run pytest  (50 tests: contrato, oráculo, productor,
-                     # transforms, ventanas TestStream, dedup, sink, consumer)
-make check           # uv run ruff check .
+uv run pytest              # 52 tests: contrato, oráculo, productor,
+                           # transforms, ventanas TestStream, dedup, sink, consumer)
+uv run ruff check .        # lint
 docker compose config --quiet   # valida el compose sin levantarlo
 ```
 
@@ -203,7 +194,7 @@ docs/rfc-001-apu-streaming.md   RFC con decisiones RN-xx
 
 ## Troubleshooting
 
-- `make run` se queda sin RAM: el stack pide ~6 GB; bajar `BEAM_PARALLELISM=1`
+- `docker compose up --build` se queda sin RAM: el stack pide ~6 GB; bajar `BEAM_PARALLELISM=1`
   y replicas de `taskmanager` en `docker-compose.yml`.
 - Dashboard vacío: revisar `docker compose logs materializer` — el dashboard
   solo lee `data/serving.db`; el `materializer` es quien lo pobla.
@@ -216,7 +207,7 @@ Dataset: **MetroPT-3**, UCI Machine Learning Repository id 791, DOI
 `10.24432/C5VW3R`, licencia **CC BY 4.0** — Davari, Veloso, Ribeiro & Gama
 (2021). El repo versiona solo una muestra derivada
 (`data/sample/apu_fleet_sample.jsonl`, ver `data/sample/ATRIBUCION.md`); el
-ZIP completo se descarga con `make dataset`.
+ZIP completo se descarga con `uv run python -m apu_streaming.dataset`.
 
 Los 6 activos (`apu-01..06`) son una **síntesis explícita** de un solo APU
 físico mediante tramos temporales disjuntos — declarado en el RFC §1, no se
@@ -232,4 +223,14 @@ Equipo individual — **Odilón Nolf Sánchez** (`onolf@outlook.com`):
 - Implementación completa: síntesis de flota, productor de replay, pipeline
   Beam, sink idempotente, dashboard, pruebas (incluida E1–E9 con TestStream),
   smokes offline/compose, documentación.
+
+## Declaración de uso de IA generativa
+
+Se utilizó un asistente conversacional como apoyo para la búsqueda
+exploratoria de antecedentes (Kafka, Beam/Flink, MetroPT-3), la revisión de
+fragmentos de código y la organización del texto del README y la RFC. El
+diseño del contrato de eventos, la calibración de umbrales sobre MetroPT-3,
+la síntesis de la flota `apu-01..06` y la implementación del pipeline fueron
+revisados y son asumidos por el estudiante. Las fuentes citadas (incluido el
+dataset MetroPT-3) fueron verificadas individualmente.
 

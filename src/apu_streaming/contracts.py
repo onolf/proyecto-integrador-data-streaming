@@ -161,8 +161,8 @@ class ContractError(ValueError):
 def decode_event(payload: bytes | str, *, stale_event_seconds: int = 86400) -> dict[str, Any]:
     """Decode and validate a raw event payload.
 
-    Raises `ContractError` with one of the stable reasons documented in the
-    RFC section 3: invalid_json, missing_field, unsupported_schema_version,
+    Raises `ContractError` with one of the stable machine-checkable reasons:
+    invalid_json, missing_field, unsupported_schema_version,
     unknown_stream, non_finite_value, invalid_timestamp, future_event_time,
     stale_event_time.
     """
