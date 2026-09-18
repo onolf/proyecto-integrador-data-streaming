@@ -1,4 +1,4 @@
-# RFC-001 · Pipeline de streaming para mantenimiento predictivo de APU
+# apu-streaming · Pipeline de streaming para mantenimiento predictivo de APU
 
 **Curso:** Streaming de datos y sus aplicaciones — Maestría en Inteligencia Artificial, FPUNA.
 **Autor:** Odilón Nolf Sánchez (`onolf@outlook.com`).
@@ -174,17 +174,17 @@ Dos `metric_type` conviven en `features.asset`:
 - `enable.auto.commit=true` en el consumidor de KafkaIO: los offsets se confirman automáticamente, lo cual es *at-least-once*, no *exactly-once*.
 - El replay acelera el tiempo de evento (`--speedup`); la velocidad de reproducción es un parámetro de la demostración, no una propiedad del dominio.
 
-## 9. Restricciones (RN)
+## 9. Restricciones
 
-- **RN-01**: `asset_id` es la clave de partición de los tópicos de entrada; ningún componente puede leer o escribir eventos de un activo asumiendo una partición fija sin pasar por esa clave.
-- **RN-02**: `event_id` se calcula exclusivamente a partir de `(asset_id, stream, source_event_time)`; nunca a partir de `event_time` desplazado ni de `ingestion_time`.
-- **RN-03**: la ventana de agregación usa `event_time`; ningún combinador o `DoFn` de agregación puede usar `ingestion_time` para agrupar.
-- **RN-04**: `allowed_lateness_seconds = 720` es el único horizonte de corrección; no existe un segundo margen de watermark independiente (ver hallazgo de la sección 6).
-- **RN-05**: el estado de deduplicación expira a `window.end + allowed_lateness_seconds`, nunca antes.
-- **RN-06**: la aplicación de un agregado en el sink exige `pane_index` entrante `≥` `pane_index` almacenado; ninguna ruta de escritura puede saltarse esa comparación.
-- **RN-07**: los tres tópicos de salida (`features.asset`, `sensor.readings.quarantine`, `sensor.readings.too_late`) se escriben siempre desde el pipeline; ninguno queda como salida lateral sin consumir.
-- **RN-08**: el sistema nunca afirma *exactly-once end-to-end*; toda declaración de semántica de entrega debe acotarse por tramo (productor→Kafka, Kafka→Beam, Beam→sink), como en la sección 7.
-- **RN-09**: `sensor.channel` conserva el identificador exacto de la columna de origen de MetroPT-3, incluidas sus inconsistencias de nomenclatura; ningún componente normaliza ese valor.
+- `asset_id` es la clave de partición de los tópicos de entrada; ningún componente puede leer o escribir eventos de un activo asumiendo una partición fija sin pasar por esa clave.
+- `event_id` se calcula exclusivamente a partir de `(asset_id, stream, source_event_time)`; nunca a partir de `event_time` desplazado ni de `ingestion_time`.
+- La ventana de agregación usa `event_time`; ningún combinador o `DoFn` de agregación puede usar `ingestion_time` para agrupar.
+- `allowed_lateness_seconds = 720` es el único horizonte de corrección; no existe un segundo margen de watermark independiente (ver hallazgo de la sección 6).
+- El estado de deduplicación expira a `window.end + allowed_lateness_seconds`, nunca antes.
+- La aplicación de un agregado en el sink exige `pane_index` entrante `≥` `pane_index` almacenado; ninguna ruta de escritura puede saltarse esa comparación.
+- Los tres tópicos de salida (`features.asset`, `sensor.readings.quarantine`, `sensor.readings.too_late`) se escriben siempre desde el pipeline; ninguno queda como salida lateral sin consumir.
+- El sistema nunca afirma *exactly-once end-to-end*; toda declaración de semántica de entrega debe acotarse por tramo (productor→Kafka, Kafka→Beam, Beam→sink), como en la sección 7.
+- `sensor.channel` conserva el identificador exacto de la columna de origen de MetroPT-3, incluidas sus inconsistencias de nomenclatura; ningún componente normaliza ese valor.
 
 ## 10. Integrantes y contribuciones
 

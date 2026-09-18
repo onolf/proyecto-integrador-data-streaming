@@ -133,7 +133,7 @@ def _(alt, mo, signal_frame):
                 color=alt.Color("asset_id:N", title="Activo"),
                 tooltip=["asset_id", "window_start:T", "value_mean", "value_min", "value_max"],
             )
-            .properties(height=320, title="motor_current promedio por ventana")
+            .properties(height=320, width="container", title="motor_current promedio por ventana")
         )
     mo.vstack([mo.md("## (b) Serie de motor_current por activo y ventana"), motor_view])
     return

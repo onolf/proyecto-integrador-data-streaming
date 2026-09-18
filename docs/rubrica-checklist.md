@@ -8,22 +8,22 @@ evidencia concreta dentro de este repositorio. Estado al commit `HEAD` de
 
 | Requisito | Evidencia | Estado |
 | --- | --- | --- |
-| Problema relevante y usuarios del resultado | RFC §1: monitoreo de flota APU, detección de fuga de aire; usuario = mantenimiento de planta | `docs/rfc-001-apu-streaming.md` |
+| Problema relevante y usuarios del resultado | documento técnico §1: monitoreo de flota APU, detección de fuga de aire; usuario = mantenimiento de planta | `docs/apu-streaming.md` |
 | Flujo end-to-end fuente → Kafka → Beam → salida | Compose orquesta producer → raw topic → pipeline Beam (Flink) → features.asset → materializer → SQLite → dashboard | `docker-compose.yml` |
 | Decisiones ligadas al dominio | Umbrales calibrados sobre MetroPT-3 (`MOTOR_RUNNING_THRESHOLD_A`, `RUNNING_RATIO_ALERT`, `OIL_TEMPERATURE_ALERT_C`) | `src/apu_streaming/config.py` |
-| Diagrama de arquitectura | RFC §3 con diagrama de componentes | `docs/rfc-001-apu-streaming.md` |
+| Diagrama de arquitectura | documento técnico §3 con diagrama de componentes | `docs/apu-streaming.md` |
 
 ## Criterio 2 · Modelado de eventos y Kafka (15 %)
 
 | Requisito | Evidencia | Estado |
 | --- | --- | --- |
 | `event_id` único y estable para dedup | `make_event_id(asset_id, stream, source_event_time)` | `src/apu_streaming/contracts.py` |
-| `key` de negocio justificada | Clave `asset_id` (orden por activo, heredado de tarea1) | RFC §4; `producer.py` |
+| `key` de negocio justificada | Clave `asset_id` (orden por activo, heredado de tarea1) | documento técnico §4; `producer.py` |
 | `event_time` separado de `ingestion_time` | Ambos campos en el contrato; lag = ingestion − event | `contracts.py: event_lag_seconds` |
 | Payload validado | `decode_event` con razones estables (`invalid_json`, …) | `contracts.py`; `tests/test_contracts.py` |
 | Versionado de esquema | `schema_version` con `SCHEMA_VERSION_MAX = 2` | `contracts.py` |
 | Tópico de entrada y de salida + laterales | `sensor.readings.raw` → `features.asset` + `quarantine` + `too_late` | `docker-compose.yml` (`kafka-init`) |
-| Particiones justificadas | 6 particiones (raw/features), 3 laterales | `docker-compose.yml`; RFC §4 |
+| Particiones justificadas | 6 particiones (raw/features), 3 laterales | `docker-compose.yml`; documento técnico §4 |
 | Replay reproducible | `ApuReplay` con seed fija, speedup controlable, escenarios `normal` / `adverse` (duplicados 2 %, desorden 5 %, tardíos 2 %, demasiado tardíos 0.5 %) | `src/apu_streaming/producer.py`; `tests/test_producer.py` |
 
 ## Criterio 3 · Pipeline Apache Beam (20 %)
@@ -35,7 +35,7 @@ evidencia concreta dentro de este repositorio. Estado al commit `HEAD` de
 | Transformaciones de dominio | `SignalStatsCombineFn`, `HealthIndicatorCombineFn`, `FormatAggregate` | `transforms.py` |
 | Agregación incremental por clave (CombineFn) | Ambos combiners incrementales y asociativos | `tests/test_transforms.py::test_signal_stats_combine_fn_is_associative_and_calculates_stddev` |
 | Salida a Kafka + sink consumible | `features.asset` → `materializer` → SQLite | `consumer.py`, `serving.py` |
-| Runner documentado | Flink 1.19 + Beam job server 2.74; DirectRunner en tests/smoke | `docker-compose.yml`; RFC §3 |
+| Runner documentado | Flink 1.19 + Beam job server 2.74; DirectRunner en tests/smoke | `docker-compose.yml`; documento técnico §3 |
 | Oráculo independiente | `summarize_readings` replica el DAG sin Beam | `src/apu_streaming/oracle.py`; `tests/test_oracle.py` |
 
 ## Criterio 4 · Tiempo de evento y ventanas (15 %)
@@ -43,11 +43,11 @@ evidencia concreta dentro de este repositorio. Estado al commit `HEAD` de
 | Requisito | Evidencia | Estado |
 | --- | --- | --- |
 | Timestamps desde `event_time` del dominio | `assign_event_timestamp` | `transforms.py` |
-| Ventana fija justificada | 5 min (300 s), alineada a epoch | RFC §5 (política temporal, continuidad de tarea2) |
+| Ventana fija justificada | 5 min (300 s), alineada a epoch | documento técnico §5 (política temporal, continuidad de tarea2) |
 | Watermark + allowed lateness | `allowed_lateness_seconds = 720`; trigger AfterWatermark con early firings y late por count en producción | `transforms.py::_windowed` |
 | Política de tardíos probada con TestStream | Eventos on-time cierran por watermark; tardío dentro de lateness entra al window correcto; ventanas adyacentes no se mezclan | `tests/test_windows_teststream.py` (4 tests) |
 | Panes y modo de acumulación | `ACCUMULATING`, metadata `pane_index/pane_timing/is_first/is_last` en cada agregado | `transforms.py::FormatAggregate` |
-| Horizonte upstream | Lag ingestion−event > allowed_lateness → topic `too_late` (RN-05) | `transforms.py::ParseAndAdmit`; test dedicado en `test_windows_teststream.py` |
+| Horizonte upstream | Lag ingestion−event > allowed_lateness → topic `too_late` | `transforms.py::ParseAndAdmit`; test dedicado en `test_windows_teststream.py` |
 
 ## Criterio 5 · Confiabilidad y corrección (15 %)
 
@@ -55,9 +55,9 @@ evidencia concreta dentro de este repositorio. Estado al commit `HEAD` de
 | --- | --- | --- |
 | Detección de duplicados con horizonte | `DeduplicateReadings`: estado por `(asset_id, ventana)`, timer de expiración por watermark en `window.end + allowed_lateness` | `transforms.py`; `tests/test_dedup_state.py` (3 tests) |
 | Claves estables en la salida para upsert | `aggregate_id = metric\|asset\|window_start` | `transforms.py::FormatAggregate` |
-| Sink idempotente | RN-06: upsert monotone por `pane_index`; pane viejo nunca retrocede valor | `src/apu_streaming/serving.py`; `tests/test_serving.py` |
+| Sink idempotente | Upsert monotone por `pane_index`; pane viejo nunca retrocede valor | `src/apu_streaming/serving.py`; `tests/test_serving.py` |
 | Materialización del pane más reciente | `AggregateStore` aplica la misma regla en memoria | `consumer.py`; `tests/test_consumer.py` |
-| Semántica declarada sin sobreprometer | At-least-once en tramo Kafka→Beam; efectivamente-once en la salida por dedup + sink idempotente; límites explícitos | RFC §6 |
+| Semántica declarada sin sobreprometer | At-least-once en tramo Kafka→Beam; efectivamente-once en la salida por dedup + sink idempotente; límites explícitos | documento técnico §6 |
 
 ## Criterio 6 · Pruebas y evidencia E2E (15 %)
 
@@ -76,10 +76,10 @@ evidencia concreta dentro de este repositorio. Estado al commit `HEAD` de
 | Requisito | Evidencia | Estado |
 | --- | --- | --- |
 | README reproducible | Quickstart, arranque detallado, topología de topics, escenarios, operación, troubleshooting | `README.md` |
-| Documento técnico breve | RFC-001: problema, usuarios, arquitectura, contrato, política temporal, garantías, límites | `docs/rfc-001-apu-streaming.md` |
+| Documento técnico breve | documento técnico: problema, usuarios, arquitectura, contrato, política temporal, garantías, límites | `docs/apu-streaming.md` |
 | Comandos de inicio/prueba/demo/parada | `make install / dataset / run / smoke / test / check / stop / logs` | `Makefile` |
 | Datos de ejemplo en el repo | `data/sample/apu_fleet_sample.jsonl` + manifest | `data/` |
-| Integrantes y contribuciones | RFC §final | `docs/rfc-001-apu-streaming.md` |
+| Integrantes y contribuciones | documento técnico §final | `docs/apu-streaming.md` |
 
 ## Verificación reproducible (lo que un externo debe poder correr)
 
@@ -102,7 +102,7 @@ uv run python scripts/check_health.py       # 8. separación de flota (post comp
   Flink la ventana sí expira según `allowed_lateness`.
 - `is_last = 1` nunca llega a materializarse con el trigger configurado
   (`AfterWatermark` + refiring tardío): el verificador de salida lee la fila
-  almacenada, que por RN-06 ya es el pane más reciente de cada `aggregate_id`.
+  almacenada, que por la regla de upsert idempotente ya es el pane más reciente de cada `aggregate_id`.
 - El smoke adverso de compose (`scripts/smoke.py`, tópicos efímeros, 5
   aserciones) está implementado pero no se ejecutó en esta sesión: requiere el
   stack Docker completo. El smoke offline (`scripts/smoke_offline.py`) sí se
@@ -116,13 +116,13 @@ uv run python scripts/check_health.py       # 8. separación de flota (post comp
 
 | Descriptor exigido (rúbrica §6) | Evidencia en este repo |
 | --- | --- |
-| 1: decisiones ligadas al dominio, diagrama claro | RFC §1 (maint. anticipado, usuario=planta), umbrales calibrados sobre tramos medidos; diagrama mermaid consistente con compose |
-| 2: contrato versionado, claves/particiones por orden/paralelismo/skew | `contracts.py` (v1/v2, rechazo por motivo estable); RFC §4 analiza orden por `asset_id`, 6 particiones vs paralelismo 2 y el skew del tramo apu-06 |
+| 1: decisiones ligadas al dominio, diagrama claro | documento técnico §1 (maint. anticipado, usuario=planta), umbrales calibrados sobre tramos medidos; diagrama mermaid consistente con compose |
+| 2: contrato versionado, claves/particiones por orden/paralelismo/skew | `contracts.py` (v1/v2, rechazo por motivo estable); documento técnico §4 analiza orden por `asset_id`, 6 particiones vs paralelismo 2 y el skew del tramo apu-06 |
 | 3: pipeline modular, salidas laterales, combinadores incrementales | `transforms.py`: ParseAndAdmit (3 salidas), 2 CombineFn incrementales asociativos probados |
 | 4: política temporal completa y probada | E1–E9 con `TestStream` + `streaming=True`: panes EARLY/ON_TIME/LATE con pane_index monótono y corrección por E6 |
-| 5: dedup con horizonte explícito, sink idempotente, sin sobreprometer | `DeduplicateReadings` con timer `window.end + lateness` (test de expiración); RN-06 upsert monótono; RFC §7 declara no-exactly-once |
+| 5: dedup con horizonte explícito, sink idempotente, sin sobreprometer | `DeduplicateReadings` con timer `window.end + lateness` (test de expiración); upsert monótono; documento técnico §7 declara no-exactly-once |
 | 6: cobertura de lógica/ventanas/fallos, escenarios reproducibles, evidencia E2E verificable | 52 tests; productor determinista por seed; dos smokes; verificador de flota con caso negativo probado |
-| 7: documentación precisa, operación de un comando, contribuciones | README completo (quickstart, puertos, inspección, troubleshooting, atribución); integrantes aquí y en RFC §final |
+| 7: documentación precisa, operación de un comando, contribuciones | README completo (quickstart, puertos, inspección, troubleshooting, atribución); integrantes aquí y en documento técnico §final |
 
 ## Prueba de reproducibilidad externa
 

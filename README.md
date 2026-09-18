@@ -7,9 +7,9 @@ Apache Beam sobre Flink (ventanas fijas de 5 min en tiempo de evento, dedup por
 `event_id`, `allowed_lateness` con paneles tardíos) y materializa agregados en
 SQLite idempotente que alimenta un dashboard marimo.
 
-La arquitectura, el contrato de eventos, las reglas RN-01…RN-0N y la
+La arquitectura, el contrato de eventos, las reglas de negocio y la
 justificación de cada decisión viven en
-[`docs/rfc-001-apu-streaming.md`](docs/rfc-001-apu-streaming.md).
+[`docs/apu-streaming.md`](docs/apu-streaming.md).
 
 ## Requisitos
 
@@ -128,7 +128,7 @@ Verificación de paridad Beam↔oráculo cubierta en `tests/test_transforms.py` 
 en `scripts/smoke_offline.py`; comportamiento temporal (watermark, secuencia
 E1–E9 con panes EARLY/ON_TIME/LATE, ventana adyacente) en
 `tests/test_windows_teststream.py`; semántica de estado del dedup y expiración
-por timer en `tests/test_dedup_state.py`; idempotencia RN-06 del sink en
+por timer en `tests/test_dedup_state.py`; idempotencia del sink en
 `tests/test_serving.py`.
 
 ### Inspección de tópicos (con el stack levantado)
@@ -174,10 +174,10 @@ scripts/
 dashboard_notebook.py   Dashboard marimo de 4 paneles
 docker-compose.yml      kafka, kafka-init, flink (jm/tm), beam-job-server,
                         pipeline, producer, materializer, dashboard, smoke
-docs/rfc-001-apu-streaming.md   RFC con decisiones RN-xx
+docs/apu-streaming.md   Documento técnico con decisiones de diseño
 ```
 
-## Decisiones clave (resumen; detalle en la RFC)
+## Decisiones clave (resumen; detalle en `docs/apu-streaming.md`)
 
 - **Ventana fija de 5 min en event-time** con watermark heurístico y
   `allowed_lateness = 720 s`; paneles tardíos en modo ACCUMULATING.
@@ -185,8 +185,8 @@ docs/rfc-001-apu-streaming.md   RFC con decisiones RN-xx
   expiración por watermark (`window.end + allowed_lateness`).
 - **Horizonte upstream** en `ParseAndAdmit`: lag `ingestion−event` mayor que
   `allowed_lateness` se deriva a `sensor.readings.too_late`, nunca toca el
-  aggregate (RN-05).
-- **Sink idempotente RN-06**: upsert por `aggregate_id` que solo aplica panes
+  aggregate.
+- **Sink idempotente**: upsert por `aggregate_id` que solo aplica panes
   con `pane_index >=` al almacenado — re-entregas y reordenamientos no hacen
   retroceder valores corregidos.
 - **Clave Kafka `asset_id`**: garantiza orden por activo (justificado en
@@ -210,7 +210,7 @@ Dataset: **MetroPT-3**, UCI Machine Learning Repository id 791, DOI
 ZIP completo se descarga con `uv run python -m apu_streaming.dataset`.
 
 Los 6 activos (`apu-01..06`) son una **síntesis explícita** de un solo APU
-físico mediante tramos temporales disjuntos — declarado en el RFC §1, no se
+físico mediante tramos temporales disjuntos — declarado en `docs/apu-streaming.md` §1, no se
 presenta como flota real.
 
 ## Integrantes y contribuciones
@@ -228,7 +228,7 @@ Equipo individual — **Odilón Nolf Sánchez** (`onolf@outlook.com`):
 
 Se utilizó un asistente conversacional como apoyo para la búsqueda
 exploratoria de antecedentes (Kafka, Beam/Flink, MetroPT-3), la revisión de
-fragmentos de código y la organización del texto del README y la RFC. El
+fragmentos de código y la organización del texto del README y del documento técnico. El
 diseño del contrato de eventos, la calibración de umbrales sobre MetroPT-3,
 la síntesis de la flota `apu-01..06` y la implementación del pipeline fueron
 revisados y son asumidos por el estudiante. Las fuentes citadas (incluido el
