@@ -175,8 +175,8 @@ def main() -> None:
     quarantine = _consume_all(bootstrap, topics["quarantine"])
     too_late = _consume_all(bootstrap, topics["too_late"])
 
-    # El smoke materializa por su cuenta (RN-06): el servicio `materializer`
-    # no corre bajo el perfil smoke.
+    # El smoke materializa por su cuenta: el servicio `materializer` no corre
+    # bajo el perfil smoke.
     conn = open_connection(smoke_db)
     try:
         for record in features:

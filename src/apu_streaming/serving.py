@@ -1,8 +1,9 @@
 """Idempotent, durable sink for aggregate records: SQLite upsert by aggregate_id.
 
-RN-06: apply an incoming aggregate only if its pane_index >= the stored one.
-This makes the sink monotone: reapplying the same pane is a no-op, and a
-stale/reordered pane can never roll back a value already corrected.
+Applies an incoming aggregate only if its pane_index is greater than or equal
+to the stored one. This makes the sink monotone: reapplying the same pane is
+a no-op, and a stale/reordered pane can never roll back a value already
+corrected.
 """
 
 from __future__ import annotations

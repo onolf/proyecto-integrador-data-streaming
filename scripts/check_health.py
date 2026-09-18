@@ -6,14 +6,14 @@ air_leak_suspected` y sale con código 1 si el veredicto por activo no coincide
 con la condición declarada en `dataset.FLEET_SEGMENTS`.
 
 Cada fila almacenada ya es el pane más reciente de su `aggregate_id`: el
-upsert monótono por `pane_index` (RN-06) descarta los anteriores. Por eso el
+upsert monótono por `pane_index` descarta los anteriores. Por eso el
 verificador no filtra por `is_last`, que bajo el trigger configurado
 (`AfterWatermark` con refiring tardío) nunca llega a ser verdadero mientras la
 ventana admita correcciones. `--only-final-panes` fuerza ese filtro.
 
-Es el criterio de fallo del paso 4 de la verificación del plan: si los seis
-activos caen del mismo lado, el umbral, la agregación o la asignación de
-ventanas están mal. Comando de una sola línea, ejecutable en PowerShell.
+Si los seis activos caen del mismo lado, el umbral, la agregación o la
+asignación de ventanas están mal. Comando de una sola línea, ejecutable en
+PowerShell.
 """
 
 from __future__ import annotations

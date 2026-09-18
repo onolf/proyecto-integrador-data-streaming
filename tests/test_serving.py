@@ -1,4 +1,4 @@
-"""Tests for the idempotent SQLite sink (RN-06: monotone upsert by pane_index)."""
+"""Tests for the idempotent SQLite sink: monotone upsert by pane_index."""
 
 from __future__ import annotations
 
