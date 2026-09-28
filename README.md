@@ -13,7 +13,7 @@ justificación de cada decisión viven en
 
 ## Requisitos
 
-- Python 3.12+ con [`uv`](https://docs.astral.sh/uv/)
+- Python 3.12 (`requires-python = ">=3.12,<3.13"`) con [`uv`](https://docs.astral.sh/uv/)
 - Docker Desktop (para el stack completo: Kafka + Flink + Beam job server)
 
 ## Quickstart (uv + Docker)
@@ -26,7 +26,13 @@ uv run pytest -q                                      # 52 tests, línea base lo
 uv run python -m apu_streaming.dataset                # una sola vez; reutiliza data/cache
 uv run python scripts/smoke_offline.py --max-readings 600   # E2E offline sin Docker
 docker compose up --build                             # stack completo
+docker compose down                                   # detener (agregar -v para borrar el volumen de Kafka)
 ```
+
+`Makefile` expone los mismos pasos como atajos: `make install`, `make dataset`,
+`make test`, `make check`, `make run`, `make smoke`, `make logs`, `make stop`.
+Requiere `make` instalado; los comandos `uv`/`docker` de arriba son la vía
+canónica.
 
 El dashboard queda en <http://localhost:2718> una vez que `materializer` haya
 empezado a poblar `data/serving.db`. Detalle de cada paso en
@@ -86,9 +92,10 @@ del sink aplicando los agregados dos veces. Exit 0 si todo cuadra.
 
 `scripts/smoke.py` (compose) crea tópicos efímeros con sufijo uuid, publica el
 sample con el escenario `adverse` más payloads inválidos, corre el pipeline
-acotado y verifica: features ≥ 1, cuarentena ≥ 1, too_late ≥ 1,
-`duplicates_dropped > 0`, y que las filas materializadas igualan los
-`aggregate_id` distintos (idempotencia).
+acotado y verifica: features ≥ 1, cuarentena ≥ 1, too_late ≥ 1, que las filas
+materializadas igualen los `aggregate_id` distintos (idempotencia) y
+`duplicates_dropped > 0` — esta última se omite con aviso si el runner no
+expone métricas.
 
 ### Verificador de salida (separación de flota)
 
@@ -100,9 +107,14 @@ uv run python scripts/check_health.py --db-path otra.db    # ruta alternativa
 Lee las filas `apu_health_indicator` materializadas (cada fila ya es el pane
 más reciente por upsert) e imprime la tabla
 `asset_id / running_ratio / oil_temperature_mean / air_leak_suspected`. Sale
-con código 1 si `apu-04/05/06` no quedan en `true` y `apu-01/02/03` en
-`false`, o si los seis activos caen del mismo lado del umbral — es la prueba
+con código 1 si algún activo no coincide con el veredicto esperado de su tramo
+(`apu-04/05/06` en `true`, `apu-01/02/03` en `false`) o si aparece un
+`asset_id` inesperado; además reporta `separation_observed` para delatar el
+caso en que los seis activos caigan del mismo lado del umbral — es la prueba
 de que umbral, agregación y ventanas funcionan end-to-end.
+
+Flags: `--only-final-panes` (filtra `is_last = 1`; queda vacío mientras las
+ventanas admitan correcciones) y `--json` (salida legible por máquina).
 
 ### Dashboard
 
@@ -112,14 +124,17 @@ uv run marimo run dashboard_notebook.py   # edición local (sin stack)
 uv run marimo check --strict dashboard_notebook.py   # gate de formato
 ```
 
-Paneles: indicador de salud por activo, serie de `motor_current`, timeline de
-panes (early/on-time/late), contadores de cuarentena y duplicados.
+Paneles: (a) indicador de salud por activo, (b) serie de `motor_current`,
+(c) timeline de panes por `aggregate_id` (early/on-time/late), (d) mensajes
+leídos vs. agregados materializados. Los contadores de cuarentena y duplicados
+descartados son métricas del job y se leen en la Flink Web UI; el panel (d)
+muestra la señal indirecta disponible desde el tópico agregado.
 
 ## Tests y validación
 
 ```bash
 uv run pytest              # 52 tests: contrato, oráculo, productor,
-                           # transforms, ventanas TestStream, dedup, sink, consumer)
+                           # transforms, ventanas TestStream, dedup, sink, consumer
 uv run ruff check .        # lint
 docker compose config --quiet   # valida el compose sin levantarlo
 ```
@@ -172,8 +187,9 @@ scripts/
   smoke.py        E2E adverso en compose: tópicos efímeros, 5 aserciones
   check_health.py Verificador de la salida: separación de flota en serving.db
 dashboard_notebook.py   Dashboard marimo de 4 paneles
-docker-compose.yml      kafka, kafka-init, flink (jm/tm), beam-job-server,
-                        pipeline, producer, materializer, dashboard, smoke
+docker-compose.yml      kafka, kafka-init, dataset-init, jobmanager,
+                        taskmanager (x2), beam-job-server, pipeline, producer,
+                        materializer, dashboard, smoke (perfil `smoke`)
 docs/apu-streaming.md   Documento técnico con decisiones de diseño
 ```
 
@@ -189,8 +205,9 @@ docs/apu-streaming.md   Documento técnico con decisiones de diseño
 - **Sink idempotente**: upsert por `aggregate_id` que solo aplica panes
   con `pane_index >=` al almacenado — re-entregas y reordenamientos no hacen
   retroceder valores corregidos.
-- **Clave Kafka `asset_id`**: garantiza orden por activo (justificado en
-  `tarea1.pdf`).
+- **Clave Kafka `asset_id`**: Kafka solo garantiza orden dentro de una
+  partición, y tanto el dedup con estado como la ventana son por activo — todos
+  los eventos de un `asset_id` deben caer en la misma partición.
 
 ## Troubleshooting
 
@@ -217,8 +234,8 @@ presenta como flota real.
 
 Equipo individual — **Odilón Nolf Sánchez** (`onolf@outlook.com`):
 
-- Continuidad de `tarea1.pdf`/`tarea2.pdf` (arquitectura Kafka y política
-  temporal diseñadas previamente).
+- Diseño de la arquitectura Kafka (tópicos en capas, clave `asset_id`) y de la
+  política temporal (ventana, watermark, lateness, panes).
 - Diseño del contrato de eventos y calibración de umbrales sobre MetroPT-3.
 - Implementación completa: síntesis de flota, productor de replay, pipeline
   Beam, sink idempotente, dashboard, pruebas (incluida E1–E9 con TestStream),
